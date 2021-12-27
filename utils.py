@@ -12,15 +12,16 @@ import numpy as np
 
 
 class MyDataset(InMemoryDataset):
-    def __init__(self, root, name, split='train', transform=None, pre_transform=None):
+    def __init__(self, root, name, transform=None, pre_transform=None): # split='train',
 
         self.root = root
         self.name = name
         super(MyDataset, self).__init__(root, transform, pre_transform)
 
-        assert split in ['train', 'val', 'test']
-        path = self.processed_paths[['train', 'val', 'test'].index(split)]
-        self.data, self.slides = torch.load(path)
+        # assert split in ['train', 'val', 'test']
+        # path = self.processed_paths[['train', 'val', 'test'].index(split)]
+
+        self.data, self.slides = torch.load(self.processed_paths[0])
 
     @property
     def raw_dir(self):
@@ -40,7 +41,8 @@ class MyDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        return ['train.pt', 'val.pt', 'test.pt']
+        # return ['train.pt', 'val.pt', 'test.pt']
+        return ['processed_data.pt']
 
     def process(self):
         # load the preprocessed adj_lists
@@ -54,7 +56,7 @@ class MyDataset(InMemoryDataset):
         y = torch.tensor(labels).type(torch.LongTensor)
 
 
-        data_list = random_planetoid_splits(x, y, homo)
+        data_list = [random_planetoid_splits(x, y, homo)]
         for i, path in enumerate(self.processed_paths):
             if self.pre_filter is not None:
                 data_list = [data for data in data_list if self.pre_filter(data)]
@@ -75,9 +77,12 @@ def metric_results(y_true, y_logits):
     all_results['F1_micro'] = f1_score(y_true, y_pred, average="micro")
     return all_results
 
+def index_to_mask(index, size):
+    mask = torch.zeros(size, dtype=torch.bool, device=index.device)
+    mask[index] = 1
+    return mask
 
-def random_planetoid_splits(x,y,neighbor_set, trn_rate=0.4, val_rate=0.01):
-
+def random_planetoid_splits(x,y, neighbor_set, trn_rate=0.4, val_rate=0.01):
     indices = []
     num_classes = len(torch.unique(y))
     for i in range(num_classes):
@@ -88,27 +93,31 @@ def random_planetoid_splits(x,y,neighbor_set, trn_rate=0.4, val_rate=0.01):
     train_index = torch.cat([i[:int(trn_rate * len(i))] for i in indices], dim=0)
     val_index = torch.cat([i[int(trn_rate * len(i)): int((trn_rate + val_rate) * len(i))] for i in indices], dim=0)
     test_index = torch.cat([i[int((trn_rate + val_rate) * len(i)):] for i in indices], dim=0)
+    edge_index = np.array([(j, i) for i in neighbor_set for j in neighbor_set[i]]).T
+    # train_edge_index, val_edge_index, test_edge_index = [],[],[]
+    # for i, neig in neighbor_set.items():
+    #     if i in train_index:
+    #         for j in neig:
+    #             if j in train_index:
+    #                 train_edge_index.append(list([j,i]))
+    #     elif i in val_index:
+    #         for j in neig:
+    #             if j in val_index:
+    #                 val_edge_index.append(list([j,i]))
+    #     else:
+    #         for j in neig:
+    #             if j in test_index:
+    #                 test_edge_index.append(list([j,i]))
 
-    train_edge_index, val_edge_index, test_edge_index = [],[],[]
-    for i, neig in neighbor_set.items():
-        if i in train_index:
-            for j in neig:
-                if j in train_index:
-                    train_edge_index.append(list([j,i]))
-        elif i in val_index:
-            for j in neig:
-                if j in val_index:
-                    val_edge_index.append(list([j,i]))
-        else:
-            for j in neig:
-                if j in test_index:
-                    test_edge_index.append(list([j,i]))
+    # train_data = Data(x=x[train_index], y=y[train_index], edge_index=torch.tensor(edge_index).type(torch.LongTensor))
+    # val_data = Data(x=x[val_index], y=y[val_index], edge_index=torch.tensor(edge_index).type(torch.LongTensor))
+    # test_data = Data(x=x[test_index], y=y[test_index], edge_index=torch.tensor(edge_index).type(torch.LongTensor))
 
-    train_data = Data(x=x[train_index], y=y[train_index], edge_index=torch.tensor(np.array(train_edge_index).T).type(torch.LongTensor))
-    val_data = Data(x=x[val_index], y=y[val_index], edge_index=torch.tensor(np.array(val_edge_index).T).type(torch.LongTensor))
-    test_data = Data(x=x[test_index], y=y[test_index], edge_index=torch.tensor(np.array(test_edge_index).T).type(torch.LongTensor))
-
-    return [train_data, val_data, test_data]
+    data = Data(x=x, y=y, edge_index=torch.tensor(edge_index).type(torch.LongTensor))
+    data.train_mask =  index_to_mask(train_index, size=data.num_nodes)
+    data.val_mask =  index_to_mask(val_index, size=data.num_nodes)
+    data.test_mask =  index_to_mask(test_index, size=data.num_nodes)
+    return data
 
 def LoadDataSet(data_name):
     '''
@@ -117,10 +126,10 @@ def LoadDataSet(data_name):
     '''
     root_path = osp.join(osp.expanduser('~'), 'datasets/')
     if data_name == 'Amazon' or 'YelpChi':
-        train_dataset = MyDataset(root=root_path, name=data_name, split='train')
-        val_dataset = MyDataset(root=root_path, name=data_name, split='val')
-        test_dataset = MyDataset(root=root_path, name=data_name, split='test')
-
+        # train_dataset = MyDataset(root=root_path, name=data_name, split='train')
+        # val_dataset = MyDataset(root=root_path, name=data_name, split='val')
+        # test_dataset = MyDataset(root=root_path, name=data_name, split='test')
+        dataset = MyDataset(root=root_path, name=data_name)
 
     elif data_name == 'OTC':
         otc_path = root_path + '/Bitcoin-OTC/'
@@ -137,8 +146,9 @@ def LoadDataSet(data_name):
             train_dataset = UPFD(upfd_path, data_name[1], upfd_data_feature[0], 'train', ToUndirected())
             val_dataset = UPFD(upfd_path, data_name[1], upfd_data_feature[0], 'val', ToUndirected())
             test_dataset = UPFD(upfd_path, data_name[1], upfd_data_feature[0], 'test', ToUndirected())
+            return train_dataset, val_dataset, test_dataset
         else:
             print('dataset name not support')
             return
 
-    return train_dataset, val_dataset, test_dataset
+    return dataset
