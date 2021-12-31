@@ -10,11 +10,44 @@ from sklearn.cluster import KMeans # for clustering
 
 import TableIt # for beatiful tables output
 
+# PGD attack model
+class AttackPGD(nn.Module):
+    def __init__(self, model, config):
+        super(AttackPGD, self).__init__()
+        self.model = model
+        self.rand = config['random_start']
+        self.step_size = config['step_size']
+        self.epsilon = config['epsilon']
+        self.num_steps = config['num_steps']
+        assert config['loss_func'] == 'xent', 'Plz use xent for loss function.'
+
+    def forward(self, feature, adj, cluster_info, num_cluster):
+        feats_adv = feature.clone().detach()
+        if self.rand:
+            feats_adv = feats_adv + torch.zeros_like(feats_adv).uniform_(-self.epsilon, self.epsilon)
+        idx = np.random.permutation(feature.shape[0])
+        shuf_feats = feature[idx, :]
+        for i in range(self.num_steps):
+            feats_adv.requires_grad_()
+            with torch.enable_grad():
+                loss = self.model(feats_adv, shuf_feats, adj, None, None, None, cluster_info, num_cluster)
+            grad_feats_adv = torch.autograd.grad(loss, feats_adv)
+            feats_adv = feats_adv.detach() + self.step_size * torch.sign(grad_feats_adv[0].detach())
+            feats_adv = torch.min(torch.max(feats_adv, feature - self.epsilon), feature + self.epsilon)
+            # import pdb;pdb.set_trace()
+            # feats_adv = torch.clamp(feats_adv, 0, 1)
+        return feats_adv
+
 def run(args, dataset, Net):
+    
     print('Pretraining...')
     # fragment for DCI and DGI (can be moved to another function/place if needed)
     if args.net in ['DCI', 'DGI', 'DGI_MLP']:
         data = dataset.data.cpu()
+        bn = nn.BatchNorm1d(data.x.shape[1], affine=False)
+        # import pdb;pdb.set_trace()
+        data.x = bn(data.x)
+        # data.x = F.normalize(data.x)
         edge_index = data.edge_index
         feats = data.x 
         nb_nodes = feats.size()[0] 
@@ -30,15 +63,22 @@ def run(args, dataset, Net):
         adj = preprocess_neighbors_sumavepool(torch.LongTensor(edge_index), nb_nodes, device)
         feats = torch.FloatTensor(feats).to(device)
         shuf_feats = torch.FloatTensor(shuf_feats).to(device)
-        
         if args.net == 'DCI':
             model_pretrain = DCI(args.num_layers, args.num_mlp_layers, input_dim, args.hidden_dim, args.neighbor_pooling_type, device, dataset, args).to(device)
-    
+            if args.adv:
+                attack = AttackPGD(model_pretrain, args.config)
             if args.training_scheme == 'decoupled':
                 optimizer_train = torch.optim.Adam(model_pretrain.parameters(), lr=args.lr)
                 for epoch in tqdm(range(1, args.epochs + 1)):
+                    if args.adv:
+                        attack.train()
+                        feats_adv = attack(feats, adj, cluster_info, args.num_cluster)
                     model_pretrain.train()
                     loss_pretrain = model_pretrain(feats, shuf_feats, adj, None, None, None, cluster_info, args.num_cluster)
+                    if args.adv:
+                        loss_pretrain = loss_pretrain + model_pretrain(feats_adv, shuf_feats, adj, None, None, None, cluster_info, args.num_cluster)
+                    # model_pretrain.train()
+                    # loss_pretrain = model_pretrain(feats, shuf_feats, adj, None, None, None, cluster_info, args.num_cluster)
                     if optimizer_train is not None:
                         optimizer_train.zero_grad()
                         loss_pretrain.backward()         
@@ -46,7 +86,8 @@ def run(args, dataset, Net):
                     # re-clustering
                     if epoch % args.recluster_interval == 0 and epoch < args.epochs:
                         model_pretrain.eval()
-                        emb = model_pretrain.get_emb(data)
+                        # emb = model_pretrain.get_emb(data)
+                        emb = model_pretrain.get_emb(feats, adj)
                         kmeans = KMeans(n_clusters=args.num_cluster, random_state=0).fit(emb.detach().cpu().numpy())
                         ss_label = kmeans.labels_
                         cluster_info = [list(np.where(ss_label==i)[0]) for i in range(args.num_cluster)]
@@ -164,6 +205,7 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--train_rate', type=float, default=0.4)
     parser.add_argument('--val_rate', type=float, default=0.1)
+    parser.add_argument('--adv', type=int, default=0)
     parser.add_argument('--batchsize', type=int, default=128)
     parser.add_argument('--dataset', type=str, choices= ['YelpChi', 'Amazon', 'OTC', 'UPFD'], default='Amazon')
     parser.add_argument('--net', type=str, choices=['CARE-GNN', 'our-GAD', 'GPR-GNN', 'GCN', 'GAT', 'APPNP', 'ChebNet', 'JKNet', 'DGI', 'DCI', 'DGI_MLP'], default='DCI')
@@ -181,7 +223,7 @@ if __name__ == '__main__':
     # args for DCI and DGI:
     parser.add_argument('--final_dropout', type=float, default=0.5,
                         help='final layer dropout (default: 0.5)')
-    parser.add_argument('--device', type=int, default=0,
+    parser.add_argument('--device', type=int, default=1,
                         help='which gpu to use if any (default: 0)')
     parser.add_argument('--num_cluster', type=int, default=2,   
                         help='number of clusters (default: 2)') 
@@ -203,7 +245,7 @@ if __name__ == '__main__':
 
     device = torch.device("cuda:" + str(args.device)) if args.cuda else torch.device("cpu") # this is more flexible
     
-    print(f'run on {args.dataset}')
+    print(f'Loading {args.dataset}...')
 
     dataset = LoadDataSet(args.dataset)
     # import pdb; pdb.set_trace()
@@ -227,7 +269,14 @@ if __name__ == '__main__':
     elif gnn_name == 'DGI_MLP':
         Net = Classifier_MLP
 
-        
+    args.config = {
+        'epsilon': 2, # 2
+        'num_steps': 5,
+        'step_size': 0.5, # 0.5
+        'random_start': True,
+        'loss_func': 'xent',
+    }
+
     res = []
     for RP in range(args.RPMAX):
         print('Repeat {}'.format(RP))
