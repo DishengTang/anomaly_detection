@@ -289,8 +289,11 @@ class GPRGNN_encoder(torch.nn.Module):
     def reset_parameters(self):
         self.prop1.reset_parameters()
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
+    # def forward(self, data):
+        # x, edge_index = data.x, data.edge_index
+    def forward(self, x, edge_index):
+        if edge_index.is_sparse:
+            edge_index = edge_index.coalesce().indices()
 
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = F.relu(self.lin1(x))
@@ -316,11 +319,13 @@ class DCI(nn.Module):
         self.data = dataset.data.to(device)
 
     def forward(self, seq1, seq2, adj, msk, samp_bias1, samp_bias2, cluster_info, cluster_num):
-    
-        h_1 = self.gprgnn(self.data)
-        self.data.x = seq2
-        h_2 = self.gprgnn(self.data)
-        self.data.x = seq1
+        h_1 = self.gprgnn(seq1, adj)
+        h_2 = self.gprgnn(seq2, adj)
+
+        # h_1 = self.gprgnn(self.data)
+        # self.data.x = seq2
+        # h_2 = self.gprgnn(self.data)
+        # self.data.x = seq1
 
         loss = 0
         batch_size = 1
@@ -342,9 +347,11 @@ class DCI(nn.Module):
             loss += loss_tmp
 
         return loss / cluster_num
-    
-    def get_emb(self, data):
-        h_1 = self.gprgnn(data)
+
+    # def get_emb(self, data):
+    #     h_1 = self.gprgnn(data)
+    def get_emb(self, seq, adj):
+        h_1 = self.gprgnn(seq, adj)
         return h_1
         
 class DGI(nn.Module):
@@ -398,8 +405,8 @@ class Classifier(nn.Module):
         return self.softmax(self.forward(data))
     
     def forward(self, data):
-       
-        h_1 = self.gprgnn(data)
+        # h_1 = self.gprgnn(data)
+        h_1 = self.gprgnn(data.x, data.edge_index)
         score_final_layer = F.dropout(self.linear_prediction(h_1), self.final_dropout, training = self.training)
         return score_final_layer
 
