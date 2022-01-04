@@ -49,7 +49,7 @@ def run(args, dataset, Net):
         # data.x = F.normalize(data.x)
         edge_index = data.edge_index
         feats = data.x 
-        nb_nodes = feats.size()[0] 
+        nb_nodes = feats.size()[0]
         input_dim = feats.size()[1]
         idx = np.random.permutation(nb_nodes)
         shuf_feats = feats[idx, :]
@@ -63,7 +63,7 @@ def run(args, dataset, Net):
         feats = torch.FloatTensor(feats).to(device)
         shuf_feats = torch.FloatTensor(shuf_feats).to(device)
         if args.net == 'DCI':
-            model_pretrain = DCI(args.num_layers, args.num_mlp_layers, input_dim, args.hidden_dim, args.neighbor_pooling_type, device, dataset, args).to(device)
+            model_pretrain = DCI(args.num_layers, args.num_mlp_layers, input_dim, args.hidden_dim, args.neighbor_pooling_type, args.negsamp_round, device, dataset, args).to(device)
             if args.adv:
                 attack = AttackPGD(model_pretrain, args.config)
             if args.training_scheme == 'decoupled':
@@ -106,7 +106,7 @@ def run(args, dataset, Net):
                 loss_pretrain = model_pretrain(feats, shuf_feats, adj, None, None, None, lbl)
                 if optimizer_train is not None:
                     optimizer_train.zero_grad()
-                    loss_pretrain.backward()         
+                    loss_pretrain.backward()
                     optimizer_train.step()
             
             
@@ -221,6 +221,7 @@ if __name__ == '__main__':
     parser.add_argument('--heads', default=1, type=int)
     parser.add_argument('--output_heads', default=1, type=int)
     # args for DCI and DGI:
+    parser.add_argument('--negsamp_round', type=int, default=1)
     parser.add_argument('--final_dropout', type=float, default=0.5,
                         help='final layer dropout (default: 0.5)')
     parser.add_argument('--device', type=int, default=0,
