@@ -317,8 +317,11 @@ class DCI(nn.Module):
         self.disc = Discriminator(hidden_dim)
         self.gprgnn = GPRGNN_encoder(dataset, args)
         self.data = dataset.data.to(device)
+        self.norm_layer = nn.BatchNorm1d(input_dim, affine=False)
 
     def forward(self, seq1, seq2, adj, msk, samp_bias1, samp_bias2, cluster_info, cluster_num):
+        seq1 = self.norm_layer(seq1)
+        seq2 = self.norm_layer(seq2)
         h_1 = self.gprgnn(seq1, adj)
         h_2 = self.gprgnn(seq2, adj)
 
@@ -397,6 +400,7 @@ class Classifier(nn.Module):
         self.final_dropout = args.final_dropout
         self.gprgnn = GPRGNN_encoder(dataset, args)
         self.softmax = torch.nn.Softmax(dim=1)
+        self.norm_layer = nn.BatchNorm1d(dataset.data.x.size()[1], affine=False)
         
     def m_loss(self):
         return nn.CrossEntropyLoss()
@@ -406,7 +410,7 @@ class Classifier(nn.Module):
     
     def forward(self, data):
         # h_1 = self.gprgnn(data)
-        h_1 = self.gprgnn(data.x, data.edge_index)
+        h_1 = self.gprgnn(self.norm_layer(data.x), data.edge_index)
         score_final_layer = F.dropout(self.linear_prediction(h_1), self.final_dropout, training = self.training)
         return score_final_layer
 
