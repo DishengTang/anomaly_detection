@@ -308,13 +308,14 @@ class GPRGNN_encoder(torch.nn.Module):
         return x
                   
 class DCI(nn.Module):
-    def __init__(self, num_layers, num_mlp_layers, input_dim, hidden_dim, neighbor_pooling_type, device, dataset, args):
+    def __init__(self, num_layers, num_mlp_layers, input_dim, hidden_dim, neighbor_pooling_type, negsamp_round, device, dataset, args):
         super(DCI, self).__init__()
         self.device = device
+        self.negsamp_round = negsamp_round
         self.gin = GraphCNN(num_layers, num_mlp_layers, input_dim, hidden_dim, neighbor_pooling_type, device)
         self.read = AvgReadout()
         self.sigm = nn.Sigmoid()
-        self.disc = Discriminator(hidden_dim)
+        self.disc = Discriminator(hidden_dim, negsamp_round)
         self.gprgnn = GPRGNN_encoder(dataset, args)
         self.data = dataset.data.to(device)
         self.norm_layer = nn.BatchNorm1d(input_dim, affine=False)
@@ -342,8 +343,10 @@ class DCI(nn.Module):
             h_2_block = torch.unsqueeze(h_2[node_idx], 0)
 
             lbl_1 = torch.ones(batch_size, len(node_idx))
-            lbl_2 = torch.zeros(batch_size, len(node_idx))
-            lbl = torch.cat((lbl_1, lbl_2), 1).to(self.device)
+            lbl_2 = torch.zeros(batch_size*self.negsamp_round, len(node_idx))
+            # import pdb;pdb.set_trace()
+            lbl = torch.cat((lbl_1, lbl_2), 0).to(self.device)
+            # lbl = torch.cat((lbl_1, lbl_2), 1).to(self.device)
 
             ret = self.disc(c_block, h_1_block, h_2_block, samp_bias1, samp_bias2)
             loss_tmp = criterion(ret, lbl)
@@ -439,9 +442,10 @@ class Classifier_MLP(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, n_h):
+    def __init__(self, n_h, negsamp_round):
         super(Discriminator, self).__init__()
         self.f_k = nn.Bilinear(n_h, n_h, 1)
+        self.negsamp_round = negsamp_round
 
         for m in self.modules():
             self.weights_init(m)
@@ -455,16 +459,24 @@ class Discriminator(nn.Module):
     def forward(self, c, h_pl, h_mi, s_bias1=None, s_bias2=None):
         c_x = torch.unsqueeze(c, 1)
         c_x = c_x.expand_as(h_pl)
-
+        scs = []
         sc_1 = torch.squeeze(self.f_k(h_pl, c_x), 2)
-        sc_2 = torch.squeeze(self.f_k(h_mi, c_x), 2)
-
         if s_bias1 is not None:
             sc_1 += s_bias1
-        if s_bias2 is not None:
-            sc_2 += s_bias2
+        scs.append(sc_1)
+        for neg in range(self.negsamp_round):
+            if neg == 0:
+                sc_2 = torch.squeeze(self.f_k(h_mi, c_x), 2)
+            else:
+                nb_nodes = h_mi.size()[0]
+                idx = np.random.permutation(nb_nodes)
+                sc_2 = torch.squeeze(self.f_k(h_mi[idx, :], c_x), 2)
+            if s_bias2 is not None:
+                sc_2 += s_bias2
+            scs.append(sc_2)
 
-        logits = torch.cat((sc_1, sc_2), 1)
+        # logits = torch.cat((sc_1, sc_2), 1)
+        logits = torch.cat(tuple(scs))
 
         return logits
         
