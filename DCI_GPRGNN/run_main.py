@@ -1,7 +1,7 @@
 import argparse
 import torch
 import torch.nn as nn
-from torch_geometric.loader import DataLoader
+from torch_geometric.data import DataLoader
 from tqdm import tqdm
 from utils import LoadDataSet, metric_results, preprocess_neighbors_sumavepool
 from model.GNN_models import *
@@ -19,7 +19,6 @@ class AttackPGD(nn.Module):
         self.step_size = config['step_size']
         self.epsilon = config['epsilon']
         self.num_steps = config['num_steps']
-        assert config['loss_func'] == 'xent', 'Plz use xent for loss function.'
 
     def forward(self, feature, adj, cluster_info, num_cluster):
         feats_adv = feature.clone().detach()
@@ -44,9 +43,9 @@ def run(args, dataset, Net):
     # fragment for DCI and DGI (can be moved to another function/place if needed)
     if args.net in ['DCI', 'DGI', 'DGI_MLP']:
         data = dataset.data.cpu()
-        bn = nn.BatchNorm1d(data.x.shape[1], affine=False)
+        # bn = nn.BatchNorm1d(data.x.shape[1], affine=False)
         # import pdb;pdb.set_trace()
-        data.x = bn(data.x)
+        # data.x = bn(data.x)
         # data.x = F.normalize(data.x)
         edge_index = data.edge_index
         feats = data.x 
@@ -182,7 +181,7 @@ def run(args, dataset, Net):
 
     best_val_loss = float('inf')
     for epoch in tqdm(range(args.epochs)):
-        train(model, optimizer, dataset, False)
+        train(model, optimizer, dataset, args.batch_train)
         # train_loss, train_res = test(model, train_dataset.data)
         val_loss, val_res = test(model, dataset.data, dataset.data.val_mask)
         test_loss, test_res = test(model, dataset.data, dataset.data.test_mask)
@@ -206,6 +205,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_rate', type=float, default=0.4)
     parser.add_argument('--val_rate', type=float, default=0.1)
     parser.add_argument('--adv', type=int, default=0)
+    parser.add_argument('--batch_train', type=int, default=0)
     parser.add_argument('--batchsize', type=int, default=128)
     parser.add_argument('--dataset', type=str, choices= ['YelpChi', 'Amazon', 'OTC', 'UPFD'], default='Amazon')
     parser.add_argument('--net', type=str, choices=['CARE-GNN', 'our-GAD', 'GPR-GNN', 'GCN', 'GAT', 'APPNP', 'ChebNet', 'JKNet', 'DGI', 'DCI', 'DGI_MLP'], default='DCI')
@@ -223,7 +223,7 @@ if __name__ == '__main__':
     # args for DCI and DGI:
     parser.add_argument('--final_dropout', type=float, default=0.5,
                         help='final layer dropout (default: 0.5)')
-    parser.add_argument('--device', type=int, default=1,
+    parser.add_argument('--device', type=int, default=0,
                         help='which gpu to use if any (default: 0)')
     parser.add_argument('--num_cluster', type=int, default=2,   
                         help='number of clusters (default: 2)') 
@@ -274,7 +274,6 @@ if __name__ == '__main__':
         'num_steps': 5,
         'step_size': 0.5, # 0.5
         'random_start': True,
-        'loss_func': 'xent',
     }
 
     res = []
@@ -304,4 +303,7 @@ if __name__ == '__main__':
     out = open("Results.txt", "a")
     TableIt.printTable(table, out)
     out.close()
+
+    if args.adv:
+        print(args.config)
 
