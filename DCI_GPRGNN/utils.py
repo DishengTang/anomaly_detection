@@ -5,10 +5,15 @@ from scipy.io import loadmat
 from sklearn.metrics import f1_score, accuracy_score, recall_score, roc_auc_score, average_precision_score
 from torch_geometric.datasets import BitcoinOTC, UPFD
 from torch_geometric.transforms import ToUndirected
-
+import scipy.sparse as sp
 import torch
 import pickle
 import numpy as np
+from tqdm import tqdm
+from torch_cluster import random_walk
+from torch_geometric.utils import to_dense_adj
+import copy
+from torch_geometric.utils import remove_self_loops
 
 def preprocess_neighbors_sumavepool(edge_index, nb_nodes, device): # for DCI and DGI
     adj_idx = edge_index
@@ -138,7 +143,7 @@ def LoadDataSet(data_name):
     return PyG-formed datasets, train_dataset, val_dataset, test_dataset
     for each dataset .data includes x, y, edge_index
     '''
-    root_path = osp.join(osp.expanduser('~'), 'anomaly/datasets/') ########## added anomaly (name of directory)
+    root_path = osp.join(osp.expanduser('~'), 'GNN/anomaly/datasets/') ########## added anomaly (name of directory)
     if data_name == 'Amazon' or 'YelpChi':
         # train_dataset = MyDataset(root=root_path, name=data_name, split='train')
         # val_dataset = MyDataset(root=root_path, name=data_name, split='val')
@@ -166,3 +171,60 @@ def LoadDataSet(data_name):
             return
 
     return dataset
+
+def normalize_adj(adj):
+    """Symmetrically normalize adjacency matrix."""
+    adj = sp.coo_matrix(adj)
+    rowsum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
+    return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
+
+def subgraph_rw(data, device, subgraph_size=3, walk_length=1):
+    (row, col), N = data.edge_index, data.num_nodes
+    all_nodes = torch.arange(N).to(device)
+    all_nodes = all_nodes.repeat_interleave(subgraph_size)
+    rw = random_walk(row, col, all_nodes, walk_length)
+    if not isinstance(rw, torch.Tensor):
+        rw = rw[0]
+    subv = []
+    for i in tqdm(range(N)):
+        trace = rw[i*subgraph_size:(i+1)*subgraph_size, 1:]
+        subv.append(torch.unique(trace.T.flatten()).tolist()) # transpose makes the 1-st neighbor ranking ahead of higher-order
+        retry_time = 0
+        while len(subv[i]) < subgraph_size: # if it does not have at least 3 neighbors, reach for higher order neighbors
+            rw = random_walk(row, col, torch.tensor([i]).to(device), walk_length=subgraph_size + 2)
+            subv[i] = torch.unique(rw[:, 1:].T.flatten()).tolist()
+            retry_time += 1
+            if (len(subv[i]) <= 2) and (retry_time >1):
+                subv[i] = (subv[i] * subgraph_size)
+        subv[i] = subv[i][:subgraph_size]
+    return subv
+
+def subgraph_rw_fast(data, device, first_neighbor=None, subgraph_size=3):
+    edge_index = remove_self_loops(data.edge_index)[0]
+    (row, col), N = edge_index, data.num_nodes
+    if first_neighbor is not None:
+        subgraphs = copy.deepcopy(first_neighbor)
+        n_size = torch.tensor([len(s) for s in subgraphs]).to(device)
+    else:
+        adj = to_dense_adj(data.edge_index).squeeze()
+        adj.fill_diagonal_(0)
+        n_size = torch.zeros(N).to(device)
+        subgraphs = []
+        for n in range(N):
+            nonzeros = adj[n,:].nonzero().flatten()
+            subgraphs.append(nonzeros[torch.randperm(len(nonzeros))].tolist()[:subgraph_size])
+            n_size[n] = len(subgraphs[n])
+        first_neighbor = copy.deepcopy(subgraphs)
+    node_idx = torch.where(n_size<subgraph_size)[0]
+    rw_node_idx = node_idx.repeat_interleave(subgraph_size)
+    rw = random_walk(row, col, rw_node_idx, walk_length=4) # don't walk too far
+    for i in range(len(node_idx)):
+        trace = rw[i*subgraph_size:(i+1)*subgraph_size, 1:]
+        subgraphs[node_idx[i]] = torch.unique(trace[:, 1:].T.flatten()).tolist()
+        if (len(subgraphs[node_idx[i]]) < subgraph_size):
+            subgraphs[node_idx[i]] = (subgraphs[node_idx[i]] * subgraph_size)
+        subgraphs[node_idx[i]] = subgraphs[node_idx[i]][:subgraph_size]
+    return first_neighbor, subgraphs

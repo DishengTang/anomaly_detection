@@ -603,3 +603,145 @@ class AvgReadout(nn.Module):
             return torch.sum(seq * msk, 1) / torch.sum(msk)
             
 #######################
+class cola_Discriminator(nn.Module):
+    def __init__(self, n_h, negsamp_round):
+        super(cola_Discriminator, self).__init__()
+        self.f_k = nn.Bilinear(n_h, n_h, 1)
+        self.negsamp_round = negsamp_round
+
+        for m in self.modules():
+            self.weights_init(m)
+
+    def weights_init(self, m):
+        if isinstance(m, nn.Bilinear):
+            torch.nn.init.xavier_uniform_(m.weight.data)
+            if m.bias is not None:
+                m.bias.data.fill_(0.0)
+
+    def forward(self, c, h_pl, h_mi, s_bias1=None, s_bias2=None):
+        if not c.size() == h_pl.size(): 
+            c_x = torch.unsqueeze(c, 1)
+            c_x = c_x.expand_as(h_pl)
+        else:
+            c_x = c
+        scs = []
+        # import pdb;pdb.set_trace()
+        sc_1 = torch.squeeze(self.f_k(h_pl, c_x))
+        if s_bias1 is not None:
+            sc_1 += s_bias1
+        scs.append(sc_1)
+        for neg in range(self.negsamp_round):
+            if neg == 0:
+                sc_2 = torch.squeeze(self.f_k(h_mi, c_x))
+            else:
+                nb_nodes = h_mi.size()[0]
+                idx = np.random.permutation(nb_nodes)
+                sc_2 = torch.squeeze(self.f_k(h_mi[idx, :], c_x))
+            if s_bias2 is not None:
+                sc_2 += s_bias2
+            scs.append(sc_2)
+
+        # logits = torch.cat((sc_1, sc_2), 1)
+        logits = torch.cat(tuple(scs))
+
+        return logits
+
+class GCN(nn.Module):
+    def __init__(self, in_ft, out_ft, act, bias=True):
+        super(GCN, self).__init__()
+        self.fc = nn.Linear(in_ft, out_ft, bias=False)
+        self.act = nn.PReLU() if act == 'prelu' else act
+        
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(out_ft))
+            self.bias.data.fill_(0.0)
+        else:
+            self.register_parameter('bias', None)
+
+        for m in self.modules():
+            self.weights_init(m)
+
+    def weights_init(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight.data)
+            if m.bias is not None:
+                m.bias.data.fill_(0.0)
+
+    def forward(self, seq, adj, sparse=False):
+        seq_fts = self.fc(seq)
+        if sparse:
+            out = torch.unsqueeze(torch.spmm(adj, torch.squeeze(seq_fts, 0)), 0)
+        else:
+            # import pdb;pdb.set_trace()
+            out = torch.bmm(adj, seq_fts)
+        if self.bias is not None:
+            out += self.bias
+        
+        return self.act(out)
+
+class COLA(nn.Module):
+    def __init__(self, input_dim, hidden_dim, negsamp_round, device, dataset, args):
+        super(COLA, self).__init__()
+        self.device = device
+        self.gcn = GCN(input_dim, hidden_dim, 'prelu')
+        self.negsamp_round = negsamp_round
+        self.read = AvgReadout()
+        self.sigm = nn.Sigmoid()
+        self.disc = cola_Discriminator(hidden_dim, negsamp_round)
+        self.gprgnn = GPRGNN_encoder(dataset, args)
+        self.data = dataset.data.to(device)
+        self.norm_layer = nn.BatchNorm1d(input_dim, affine=False)
+
+    def forward(self, seq1, seq2, adj, subgraphs):
+        seq1 = self.norm_layer(seq1)
+        seq2 = self.norm_layer(seq2)
+        h_1 = self.gprgnn(seq1, adj)
+        h_2 = self.gprgnn(seq2, adj)
+
+        # h_1 = self.gprgnn(self.data)
+        # self.data.x = seq2
+        # h_2 = self.gprgnn(self.data)
+        # self.data.x = seq1
+
+        loss = 0
+        num_nodes = seq1.shape[0]
+        criterion = nn.BCEWithLogitsLoss()
+        # import pdb;pdb.set_trace()
+        h_1_block = h_1
+        # import pdb;pdb.set_trace()
+        c_block = self.read(h_1[subgraphs], None)
+        c_block = self.sigm(c_block)
+        h_2_block = h_2
+
+        lbl_1 = torch.ones(num_nodes)
+        lbl_2 = torch.zeros(self.negsamp_round*num_nodes)
+        # import pdb;pdb.set_trace()
+        lbl = torch.cat((lbl_1, lbl_2)).to(self.device)
+        # lbl = torch.cat((lbl_1, lbl_2), 1).to(self.device)
+
+        ret = self.disc(c_block, h_1_block, h_2_block)
+        loss = criterion(ret, lbl)
+        # for n in range(num_nodes):
+        #     h_1_block = torch.unsqueeze(h_1[n], 0)
+        #     # import pdb;pdb.set_trace()
+        #     c_block = self.read(torch.unsqueeze(h_1[subgraphs[n]], 0), None)
+        #     c_block = self.sigm(c_block)
+        #     h_2_block = torch.unsqueeze(h_2[n], 0)
+
+        #     lbl_1 = torch.ones(1, 1)
+        #     lbl_2 = torch.zeros(self.negsamp_round, 1)
+        #     # import pdb;pdb.set_trace()
+        #     lbl = torch.cat((lbl_1, lbl_2), 0).to(self.device)
+        #     # lbl = torch.cat((lbl_1, lbl_2), 1).to(self.device)
+
+        #     ret = self.disc(c_block, h_1_block, h_2_block)
+        #     loss_tmp = criterion(ret, lbl)
+        #     loss += loss_tmp
+
+        return loss
+
+    # def get_emb(self, data):
+    #     h_1 = self.gprgnn(data)
+    def get_emb(self, seq, adj):
+        h_1 = self.gprgnn(seq, adj)
+        return h_1

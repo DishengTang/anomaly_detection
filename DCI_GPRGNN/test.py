@@ -1,9 +1,10 @@
+# %%
 import argparse
 import torch
 import torch.nn as nn
 from torch_geometric.data import DataLoader
 from tqdm import tqdm
-from utils import *
+from utils import LoadDataSet, metric_results, preprocess_neighbors_sumavepool
 from model.GNN_models import *
 
 from sklearn.cluster import KMeans # for clustering
@@ -41,7 +42,7 @@ def run(args, dataset, Net):
     
     print('Pretraining...')
     # fragment for DCI and DGI (can be moved to another function/place if needed)
-    if args.net in ['DCI', 'DGI', 'DGI_MLP', 'COLA']:
+    if args.net in ['DCI', 'DGI', 'DGI_MLP']:
         data = dataset.data.cpu()
         # bn = nn.BatchNorm1d(data.x.shape[1], affine=False)
         # import pdb;pdb.set_trace()
@@ -49,7 +50,7 @@ def run(args, dataset, Net):
         # data.x = F.normalize(data.x)
         edge_index = data.edge_index
         feats = data.x 
-        nb_nodes = feats.size()[0]
+        nb_nodes = feats.size()[0] 
         input_dim = feats.size()[1]
         idx = np.random.permutation(nb_nodes)
         shuf_feats = feats[idx, :]
@@ -63,7 +64,7 @@ def run(args, dataset, Net):
         feats = torch.FloatTensor(feats).to(device)
         shuf_feats = torch.FloatTensor(shuf_feats).to(device)
         if args.net == 'DCI':
-            model_pretrain = DCI(args.num_layers, args.num_mlp_layers, input_dim, args.hidden_dim, args.neighbor_pooling_type, args.negsamp_round, device, dataset, args).to(device)
+            model_pretrain = DCI(args.num_layers, args.num_mlp_layers, input_dim, args.hidden_dim, args.neighbor_pooling_type, device, dataset, args).to(device)
             if args.adv:
                 attack = AttackPGD(model_pretrain, args.config)
             if args.training_scheme == 'decoupled':
@@ -106,29 +107,11 @@ def run(args, dataset, Net):
                 loss_pretrain = model_pretrain(feats, shuf_feats, adj, None, None, None, lbl)
                 if optimizer_train is not None:
                     optimizer_train.zero_grad()
-                    loss_pretrain.backward()
+                    loss_pretrain.backward()         
                     optimizer_train.step()
             
             
             print('Pre-training of DGI is done!')
-        if args.net == 'COLA':
-            # adj = normalize_adj(adj)
-            # adj = (adj + sp.eye(adj.shape[0])).todense()
-            # adj = adj.todense()
-            sparse_adj = adj
-            adj = adj.unsqueeze(0).to_dense()
-            model_pretrain = COLA(input_dim, args.hidden_dim, args.negsamp_round, device, dataset, args).to(device)
-            optimizer_train = torch.optim.Adam(model_pretrain.parameters(), lr=args.lr)
-            first_neighbor = None
-            for epoch in tqdm(range(1, args.epochs + 1)):
-                model_pretrain.train()
-                first_neighbor, subgraphs = subgraph_rw_fast(data, device, first_neighbor=first_neighbor, subgraph_size=args.subgraph_size) # 5 for amazon, 3 for yelp
-                # subgraphs = subgraph_rw(data, device, subgraph_size=3, walk_length=5)
-                loss_pretrain = model_pretrain(feats, shuf_feats, sparse_adj, subgraphs)
-                if optimizer_train is not None:
-                    optimizer_train.zero_grad()
-                    loss_pretrain.backward()         
-                    optimizer_train.step()
         
         
     def train(model, optimizer, dataset, batch_train=False):
@@ -174,7 +157,7 @@ def run(args, dataset, Net):
         model = Net(dataset, args)
     if args.cuda:
         model = model.to(device)
-    if args.net in ['DCI', 'DGI', 'COLA']:
+    if args.net in ['DGI', 'DGI']:
         pretrained_dict = model_pretrain.state_dict()
         model_dict = model.state_dict()
         pretrained_dict =  {k: v for k, v in pretrained_dict.items() if k in model_dict}
@@ -193,9 +176,6 @@ def run(args, dataset, Net):
         ],
             lr=args.lr)
     else:
-        # for name, param in model.named_parameters():
-        #     if param.requires_grad:
-        #         print(name, param.data)
         optimizer = torch.optim.Adam(model.parameters(),
                                      lr=args.lr,
                                      weight_decay=args.weight_decay)
@@ -214,122 +194,162 @@ def run(args, dataset, Net):
     return best_epoch, best_test_res
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--epochs', type=int, default=200)
+parser.add_argument('--lr', type=float, default=0.002)
+parser.add_argument('--weight_decay', type=float, default=0.0005)
+parser.add_argument('--early_stopping', type=int, default=200)
+parser.add_argument('--hidden', type=int, default=128)
+parser.add_argument('--dropout', type=float, default=0.0)
+parser.add_argument('--train_rate', type=float, default=0.4)
+parser.add_argument('--val_rate', type=float, default=0.1)
+parser.add_argument('--adv', type=int, default=0)
+parser.add_argument('--batch_train', type=int, default=0)
+parser.add_argument('--batchsize', type=int, default=128)
+parser.add_argument('--dataset', type=str, choices= ['YelpChi', 'Amazon', 'OTC', 'UPFD'], default='Amazon')
+parser.add_argument('--net', type=str, choices=['CARE-GNN', 'our-GAD', 'GPR-GNN', 'GCN', 'GAT', 'APPNP', 'ChebNet', 'JKNet', 'DGI', 'DCI', 'DGI_MLP'], default='DCI')
+parser.add_argument('--no_cuda', action='store_true', default=False, help='Disables CUDA training.')
+parser.add_argument('--RPMAX', type=int, default=1, help='repeat count')
+parser.add_argument('--K', type=int, default=8)
+parser.add_argument('--alpha', type=float, default=0.1)
+parser.add_argument('--dprate', type=float, default=0.0)
+parser.add_argument('--Init', type=str,
+                    choices=['SGC', 'PPR', 'NPPR', 'Random', 'WS', 'Null'],
+                    default='PPR')
+parser.add_argument('--Gamma', type=str, default=None)
+parser.add_argument('--heads', default=1, type=int)
+parser.add_argument('--output_heads', default=1, type=int)
+# args for DCI and DGI:
+parser.add_argument('--final_dropout', type=float, default=0.5,
+                    help='final layer dropout (default: 0.5)')
+parser.add_argument('--device', type=int, default=0,
+                    help='which gpu to use if any (default: 0)')
+parser.add_argument('--num_cluster', type=int, default=2,   
+                    help='number of clusters (default: 2)') 
+parser.add_argument('--num_layers', type=int, default=2,
+                    help='number of layers (default: 2)')
+parser.add_argument('--num_mlp_layers', type=int, default=2,
+                    help='number of layers for MLP EXCLUDING the input one (default: 2). 1 means linear model.')
+parser.add_argument('--hidden_dim', type=int, default=64,
+                    help='number of hidden units (default: 128)')
+parser.add_argument('--neighbor_pooling_type', type=str, default="average", choices=["sum", "average"],
+                    help='Pooling for over neighboring nodes: sum or average')
+parser.add_argument('--training_scheme', type=str, default="decoupled", choices=["decoupled", "joint"],
+                    help='Training schemes: decoupled or joint')
+parser.add_argument('--recluster_interval', type=int, default=20,
+                    help='the interval of reclustering (default: 20)')
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--lr', type=float, default=0.002)
-    parser.add_argument('--weight_decay', type=float, default=0.0005)
-    parser.add_argument('--early_stopping', type=int, default=200)
-    parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--train_rate', type=float, default=0.4)
-    parser.add_argument('--val_rate', type=float, default=0.1)
-    parser.add_argument('--adv', type=int, default=0)
-    parser.add_argument('--batch_train', type=int, default=0)
-    parser.add_argument('--batchsize', type=int, default=128)
-    parser.add_argument('--dataset', type=str, choices= ['YelpChi', 'Amazon', 'OTC', 'UPFD'], default='Amazon')
-    parser.add_argument('--net', type=str, choices=['CARE-GNN', 'our-GAD', 'GPR-GNN', 'GCN', 'GAT', 'APPNP', 'ChebNet', 'JKNet', 'DGI', 'DCI', 'DGI_MLP', 'COLA'], default='DCI')
-    parser.add_argument('--no_cuda', action='store_true', default=False, help='Disables CUDA training.')
-    parser.add_argument('--RPMAX', type=int, default=1, help='repeat count')
-    parser.add_argument('--K', type=int, default=8)
-    parser.add_argument('--alpha', type=float, default=0.1)
-    parser.add_argument('--dprate', type=float, default=0.0)
-    parser.add_argument('--Init', type=str,
-                        choices=['SGC', 'PPR', 'NPPR', 'Random', 'WS', 'Null'],
-                        default='PPR')
-    parser.add_argument('--Gamma', type=str, default=None)
-    parser.add_argument('--heads', default=1, type=int)
-    parser.add_argument('--output_heads', default=1, type=int)
-    # args for DCI and DGI:
-    parser.add_argument('--negsamp_round', type=int, default=1)
-    parser.add_argument('--final_dropout', type=float, default=0.5,
-                        help='final layer dropout (default: 0.5)')
-    parser.add_argument('--device', type=int, default=0,
-                        help='which gpu to use if any (default: 0)')
-    parser.add_argument('--num_cluster', type=int, default=2,   
-                        help='number of clusters (default: 2)') 
-    parser.add_argument('--num_layers', type=int, default=2,
-                        help='number of layers (default: 2)')
-    parser.add_argument('--num_mlp_layers', type=int, default=2,
-                        help='number of layers for MLP EXCLUDING the input one (default: 2). 1 means linear model.')
-    parser.add_argument('--hidden_dim', type=int, default=64,
-                        help='number of hidden units (default: 128)')
-    parser.add_argument('--neighbor_pooling_type', type=str, default="average", choices=["sum", "average"],
-                        help='Pooling for over neighboring nodes: sum or average')
-    parser.add_argument('--training_scheme', type=str, default="decoupled", choices=["decoupled", "joint"],
-                        help='Training schemes: decoupled or joint')
-    parser.add_argument('--recluster_interval', type=int, default=20,
-                        help='the interval of reclustering (default: 20)')
-    # args for COLA:
-    parser.add_argument('--subgraph_size', type=int, default=5)
-    
-    args = parser.parse_args()
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+args = parser.parse_args(['--dataset', 'YelpChi'])
+args.cuda = not args.no_cuda and torch.cuda.is_available()
 
-    device = torch.device("cuda:" + str(args.device)) if args.cuda else torch.device("cpu") # this is more flexible
-    b_xent = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.tensor([args.negsamp_round]).to(device))
-    print(f'Loading {args.dataset}...')
+device = torch.device("cuda:" + str(args.device)) if args.cuda else torch.device("cpu") # this is more flexible
 
-    dataset = LoadDataSet(args.dataset)
-    # import pdb; pdb.set_trace()
-    gnn_name = args.net
-    if gnn_name == 'GPR-GNN':
-        Net = GPRGNN
-    elif gnn_name == 'GAT':
-        Net = GAT_Net
-    elif gnn_name == 'APPNP':
-        Net = APPNP_Net
-    elif gnn_name == 'ChebNet':
-        Net = ChebNet
-    elif gnn_name == 'JKNet':
-        Net = GCN_JKNet
-    elif gnn_name == 'GCN':
-        Net = GCN_Net
-    elif gnn_name == 'DGI':
-        Net = Classifier
-    elif gnn_name == 'DCI':
-        Net = Classifier
-    elif gnn_name == 'COLA':
-        Net = Classifier
-    elif gnn_name == 'DGI_MLP':
-        Net = Classifier_MLP
+print(f'Loading {args.dataset}...')
 
-    args.config = {
-        'epsilon': 2, # 2
-        'num_steps': 5,
-        'step_size': 0.5, # 0.5
-        'random_start': True,
-    }
+dataset = LoadDataSet(args.dataset)
+# import pdb; pdb.set_trace()
+gnn_name = args.net
+if gnn_name == 'GPR-GNN':
+    Net = GPRGNN
+elif gnn_name == 'GAT':
+    Net = GAT_Net
+elif gnn_name == 'APPNP':
+    Net = APPNP_Net
+elif gnn_name == 'ChebNet':
+    Net = ChebNet
+elif gnn_name == 'JKNet':
+    Net = GCN_JKNet
+elif gnn_name == 'GCN':
+    Net = GCN_Net
+elif gnn_name == 'DGI':
+    Net = Classifier
+elif gnn_name == 'DCI':
+    Net = Classifier
+elif gnn_name == 'DGI_MLP':
+    Net = Classifier_MLP
 
-    res = []
-    for RP in range(args.RPMAX):
-        print('Repeat {}'.format(RP))
-        best_epoch, best_test_res = run(args, dataset, Net)
-        print(best_epoch, best_test_res)
-        res.append([best_test_res['auc'], best_test_res['ap'], best_test_res['acc'], best_test_res['recall'], best_test_res['F1_macro'], best_test_res['F1_micro']])
-    avg_res = np.mean(res, axis=0) * 100
-    print('average results:', avg_res)
-    
-    table = [
-            [f'epochs = {args.epochs}', f'lr = {args.lr}', f'wd = {args.weight_decay}'],
-            [f'early_stop = {args.early_stopping}',f'hidden = {args.hidden}',f'dropout = {args.dropout}'],
-            [f'train_rate = {args.train_rate}',f'val_rate = {args.val_rate}',f'batchsize = {args.batchsize}'],
-            [f'dataset = {args.dataset}',f'net = {args.net}',f'no_cuda = {args.no_cuda}'],
-            [f'RPMAX = {args.RPMAX}',f'K = {args.K}',f'alpha = {args.alpha}'],
-            [f'dprate = {args.dprate}',f'Init = {args.Init}',f'Gamma = {args.Gamma}'],
-            [f'heads = {args.heads}',f'output_heads = {args.output_heads}',f'final_dropout_DCI_DGI = {args.final_dropout}'],
-            [f'device = {args.device}',f'num_cluster_DCI = {args.num_cluster}',f'num_layers_DCI_DGI = {args.num_layers}'],
-            [f'num_mlp_layers_DCI_DGI = {args.num_mlp_layers}',f'hidden_dim_DCI_DGI = {args.hidden_dim}',f'neighbor_pooling_type_DCI_DGI = {args.neighbor_pooling_type}'],
-            [f'training_scheme_DCI_DGI = {args.training_scheme}',f'recluster_interval_DCI = {args.recluster_interval}',f''],
-            [f'auc: {avg_res[0]:.4f}',f'ap: {avg_res[1]:.4f}',f'acc: {avg_res[2]:.4f}'],
-            [f'recall: {avg_res[3]:.4f}',f'F1_macro: {avg_res[4]:.4f}',f'F1_micro: {avg_res[5]:.4f}']
-            ]
-    
-    out = open("Results.txt", "a")
-    TableIt.printTable(table, out)
-    out.close()
+# %%
+import torch_cluster
+from torch_cluster import random_walk
+from torch_sparse import SparseTensor
+from torch_geometric.utils import to_dense_adj
+from tqdm import tqdm
+# %%
+# data = dataset.data
+# subgraph_size=3; walk_length=4
+# def subgraph_rw(data, subgraph_size=3, walk_length=1):
+#     (row, col), N = data.edge_index, data.num_nodes
+#     all_nodes = torch.arange(N)
+#     all_nodes = all_nodes.repeat_interleave(subgraph_size)
+#     rw = random_walk(row, col, all_nodes, walk_length)
+#     if not isinstance(rw, torch.Tensor):
+#         rw = rw[0]
+#     subv = []
+#     for i in tqdm(range(N)):
+#         trace = rw[i*subgraph_size:(i+1)*subgraph_size, 1:]
+#         subv.append(torch.unique(trace.T.flatten()).tolist()) # transpose makes the 1-st neighbor ranking ahead of higher-order
+#         retry_time = 0
+#         while len(subv[i]) < subgraph_size: # if it does not have at least 3 neighbors, reach for higher order neighbors
+#             rw = random_walk(row, col, torch.tensor([i]), walk_length=subgraph_size+1)
+#             subv[i] = torch.unique(rw[:, 1:].T.flatten()).tolist()
+#             retry_time += 1
+#             if (len(subv[i]) < subgraph_size) and (retry_time >1):
+#                 subv[i] = (subv[i] * subgraph_size)
+#         subv[i] = subv[i][:subgraph_size]
+#     return subv
+# subv = subgraph_rw(data, subgraph_size=4, walk_length=4)
+# %%
+# subgraph_size = 5
+# subgraph_size=3; walk_length=4
+# def subgraph_rw_fast(data, subgraph_size=3):
+#     (row, col), N = data.edge_index, data.num_nodes
+#     adj = to_dense_adj(data.edge_index).squeeze()
+#     adj.fill_diagonal_(0)
+#     adj_2 = torch.mm(adj, adj)
+#     subgraphs = []
+#     for n in tqdm(range(N)):
+#         subgraphs.append(adj[n,:].nonzero().flatten().tolist()[:subgraph_size])
+#         if len(subgraphs[n]) < subgraph_size: # if it does not have at least 3 neighbors, reach for higher order neighbors
+#             rw = random_walk(row, col, torch.tensor([n]*subgraph_size), walk_length=subgraph_size)
+#             subgraphs[n] = torch.unique(rw[:, 1:].T.flatten()).tolist()
+#             if (len(subgraphs[n]) < subgraph_size):
+#                 subgraphs[n] = (subgraphs[n] * subgraph_size)
+#         subgraphs[n] = subgraphs[n][:subgraph_size]
+#     return subgraphs
+# subgraphs = subgraph_rw_fast(data, subgraph_size=4)
 
-    if args.adv:
-        print(args.config)
-
+# %%
+import copy
+from torch_geometric.utils import remove_self_loops
+data = dataset.data
+def subgraph_rw_fast(data, first_neighbor=None, subgraph_size=3):
+    edge_index = remove_self_loops(data.edge_index)[0]
+    (row, col), N = edge_index, data.num_nodes
+    if first_neighbor is not None:
+        subgraphs = copy.deepcopy(first_neighbor)
+        n_size = torch.tensor([len(s) for s in subgraphs])
+    else:
+        adj = to_dense_adj(data.edge_index).squeeze()
+        adj.fill_diagonal_(0)
+        n_size = torch.zeros(N)
+        subgraphs = []
+        for n in range(N):
+            nonzeros = adj[n,:].nonzero().flatten()
+            subgraphs.append(nonzeros[torch.randperm(len(nonzeros))].tolist()[:subgraph_size])
+            n_size[n] = len(subgraphs[n])
+        first_neighbor = copy.deepcopy(subgraphs)
+    # import pdb;pdb.set_trace()
+    node_idx = torch.where(n_size<subgraph_size)[0]
+    rw_node_idx = node_idx.repeat_interleave(subgraph_size)
+    rw = random_walk(row, col, rw_node_idx, walk_length=subgraph_size)
+    for i in tqdm(range(len(node_idx))):
+        trace = rw[i*subgraph_size:(i+1)*subgraph_size, 1:]
+        subgraphs[node_idx[i]] = torch.unique(trace[:, 1:].T.flatten()).tolist()
+        if (len(subgraphs[node_idx[i]]) < subgraph_size):
+            subgraphs[node_idx[i]] = (subgraphs[node_idx[i]] * subgraph_size)
+        subgraphs[node_idx[i]] = subgraphs[node_idx[i]][:subgraph_size]
+    return first_neighbor, subgraphs
+first_neighbor = None
+first_neighbor, subgraphs = subgraph_rw_fast(data, first_neighbor=first_neighbor, subgraph_size=4)
+# first_neighbor, subgraphs = subgraph_rw_fast(data, first_neighbor=first_neighbor, subgraph_size=4)
+# %%
