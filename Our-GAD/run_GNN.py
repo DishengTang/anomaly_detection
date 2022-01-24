@@ -11,8 +11,12 @@ from model.DCL_model import SchemaCL, SupCL, DCI
 from model.clf_model import Classifier#, DCI_Classifier
 from utils import laplace_decomp
 import model.GCL.augmentors as Aug
-
-device = torch.device('cuda')
+from torch_geometric.utils import to_dense_adj
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import pandas as pd
+import seaborn as sns
+# device = torch.device('cuda')
 
 def run(args, dataset, Net, model_pretrain=None):
 
@@ -28,7 +32,7 @@ def run(args, dataset, Net, model_pretrain=None):
             loss = model.m_loss()(out, data.y[data.train_mask])
             loss.backward()
             optimizer.step()
-
+        return loss.detach().item()
 
     ###  inductive test
     # def test(model, data, mode):
@@ -58,7 +62,7 @@ def run(args, dataset, Net, model_pretrain=None):
         y_logits = model.to_prob(data.x, data.edge_index)
         loss = model.m_loss()(model(data.x, data.edge_index)[mask], data.y[mask])
         results = metric_results(y_true=data.y[mask].data.cpu().numpy(), y_logits=y_logits[mask].data.cpu().numpy())
-        return loss, results
+        return loss.item(), results
 
     model = Net(dataset, args)
     if args.cuda:
@@ -90,8 +94,10 @@ def run(args, dataset, Net, model_pretrain=None):
                                      weight_decay=args.weight_decay)
 
     best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
     for epoch in tqdm(range(args.epochs)):
-        train(model, optimizer, dataset, args.batch_train)
+        train_loss = train(model, optimizer, dataset, args.batch_train)
         # train_loss, train_res = test(model, train_dataset.data)
 
         ### inductive
@@ -101,12 +107,24 @@ def run(args, dataset, Net, model_pretrain=None):
         ### transductive
         val_loss, val_res = test(model, dataset.data, dataset.data.val_mask)
         test_loss, test_res = test(model, dataset.data, dataset.data.test_mask)
-        if val_loss < best_val_loss:
+        if val_loss <= best_val_loss:
             best_val_loss = val_loss
             best_val_res = val_res
             best_test_res = test_res
             best_epoch = epoch
-    return best_epoch, best_test_res
+            X = model.get_emb(dataset.data.x, dataset.data.edge_index)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+    # X_embedded = TSNE(n_components=2, perplexity=100, learning_rate=200, early_exaggeration=1, verbose=1, init='random').fit_transform(X.cpu().detach().numpy())
+    # df = pd.DataFrame()
+    # df['x'] = X_embedded[:, 0]
+    # df['y'] = X_embedded[:, 1]
+    # df['class'] = dataset.data.y.cpu().detach().numpy()
+    # plt.figure()
+    # sns.scatterplot(x='x', y='y', hue='class', alpha=0.5, data=df)
+    # plt.savefig('{}_{}_TSNE.jpg'.format(args.net, args.dataset))
+    return best_epoch, best_test_res, train_losses, val_losses
 
 
 def run_our(args, dataset, Net):
@@ -135,7 +153,7 @@ def run_our(args, dataset, Net):
     #                                      'weight_decay':args.weight_decay, 'lr':args.lr}], lr=args.lr)
     optimizer_train = torch.optim.Adam(pretrain_model.parameters(), weight_decay=args.weight_decay,lr=args.lr)
 
-
+    pretrain_losses = []
     for epoch in tqdm(range(args.epochs)):
         ## for mini-batch train
         # train_idx = np.arange(data.num_nodes)[data.train_mask.cpu()]
@@ -171,6 +189,7 @@ def run_our(args, dataset, Net):
             # loss_pretrain = pretrain_model(data.x[data.train_mask], data.train_edge_index, data.y[data.train_mask])
         loss_pretrain.backward()
         optimizer_train.step()
+        pretrain_losses.append(loss_pretrain.detach().item())
             # loss += loss_pretrain.item()
         #
         # print(f'Epoch:{epoch}, loss:{loss / num_batches}')
@@ -178,8 +197,8 @@ def run_our(args, dataset, Net):
 
     # fine_tuning process
 
-    best_epoch, best_test_res = run(args, dataset, Net, pretrain_model)
-    return best_epoch, best_test_res
+    best_epoch, best_test_res, train_losses, val_losses = run(args, dataset, Net, pretrain_model)
+    return best_epoch, best_test_res, pretrain_losses, train_losses, val_losses
 
 
 if __name__ == '__main__':
@@ -189,7 +208,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=0.0005)
     parser.add_argument('--early_stopping', type=int, default=200)
     parser.add_argument('--hidden', type=int, default=64)
-    parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--train_rate', type=float, default=0.4)
     parser.add_argument('--val_rate', type=float, default=0.1)
     parser.add_argument('--batchsize', type=int, default=1024, help='batch size 1024 for yelp, 256 for amazon.')
@@ -215,7 +234,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_freqs', type=int, default=20, help='select the max_freqs lowest engenvalues after Laplacian Decomposition')
     parser.add_argument('--batch_train', type=bool, default=False)
     parser.add_argument('--num_hops', default=2, type=int)
-    parser.add_argument('--final_dropout', type=float, default=0.1,
+    parser.add_argument('--final_dropout', type=float, default=0.5,
                         help='final layer dropout (default: 0.5)')
     parser.add_argument('--LPE_dim', default=16, type=int)  #should be the same as dim_k
     parser.add_argument('--LPE_layers', default=1, type=int)
@@ -224,10 +243,13 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_encoder', default='GPRGNN', type=str)
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
-    # device = torch.device("cuda:" + str(args.device) if args.cuda else torch.device("cpu"))
+    device = torch.device("cuda:" + str(args.device) if args.cuda else torch.device("cpu"))
     print(f'run on {args.dataset}')
 
     dataset = LoadDataSet(args.dataset)
+    # adj = to_dense_adj(dataset.data.edge_index).squeeze()
+    # UU,SS,VV = torch.svd_lowrank(adj, q=args.max_freqs)
+    # dataset.data.x = torch.cat((dataset.data.x, VV), 1)
     data = dataset.data #.to(device)
     # not for otc, alpha dataset
     # print('homophily ratio:', homophily(dataset.data.edge_index, dataset.data.y, method='node'))
@@ -264,11 +286,26 @@ if __name__ == '__main__':
     res = []
     for RP in range(args.RPMAX):
         if gnn_name == 'Our-GAD' or gnn_name == 'SupCL':
-            best_epoch, best_test_res = run_our(args, dataset, Net)
+            best_epoch, best_test_res, pretrain_losses, train_losses, val_losses = run_our(args, dataset, Net)
         else:
-            best_epoch, best_test_res = run(args, dataset, Net)
+            best_epoch, best_test_res, train_losses, val_losses = run(args, dataset, Net)
         print(best_epoch, best_test_res)
         res.append([best_test_res['auc'], best_test_res['ap'], best_test_res['acc'], best_test_res['recall'], best_test_res['F1_macro'], best_test_res['F1_micro']])
+        # if pretrain_losses is not None:
+        #     plt.figure()
+        #     plt.plot(pretrain_losses)
+        #     plt.xlabel('epoch')
+        #     plt.ylabel('loss')
+        #     plt.title('pretrain loss repeat {}'.format(RP))
+        #     plt.savefig('{}_pretrain_loss_{}.jpg'.format(args.dataset, RP))
+        # plt.figure()
+        # plt.plot(train_losses, label='train loss')
+        # plt.plot(val_losses, label='val loss')
+        # plt.xlabel('epoch')
+        # plt.ylabel('loss')
+        # plt.title('finetune loss repeat {}'.format(RP))
+        # plt.legend()
+        # plt.savefig('{}_finetune_loss_{}.jpg'.format(args.dataset, RP))
     print('average results:', np.mean(res, axis=0) * 100)
 
 

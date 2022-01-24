@@ -225,7 +225,7 @@ def LoadDataSet(data_name):
     return PyG-formed datasets, train_dataset, val_dataset, test_dataset
     for each dataset .data includes x, y, edge_index
     '''
-    root_path = osp.join(osp.expanduser('~'), 'anomaly/datasets/')
+    root_path = osp.join(osp.expanduser('~'), 'GNN/anomaly/datasets/')
     if data_name in ['Amazon', 'YelpChi','alpha', 'otc', 'epinions']:
         # train_dataset = MyDataset(root=root_path, name=data_name, split='train')
         # val_dataset = MyDataset(root=root_path, name=data_name, split='val')
